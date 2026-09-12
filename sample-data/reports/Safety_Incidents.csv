@@ -1,0 +1,6 @@
+date,site,incident_type,severity,status
+2026-08-02,Coastal Ridge,Near miss,Low,Closed
+2026-08-11,Coastal Ridge,Equipment fault,Medium,Closed
+2026-08-19,Coastal Ridge,Cooling system alarm,High,Open
+2026-08-27,Coastal Ridge,Working at height deviation,Medium,Open
+2026-09-03,Coastal Ridge,Gearbox vibration alarm,High,Open
