@@ -7,7 +7,7 @@
 -- RLS on document_chunks is the hard boundary.
 create or replace function public.match_document_chunks(
     p_user_id         uuid,
-    p_query_embedding vector(512),
+    p_query_embedding vector(384),
     p_match_count     int default 6,
     p_document_ids    uuid[] default null
 )

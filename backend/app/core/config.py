@@ -47,7 +47,10 @@ class Settings(BaseSettings):
     max_reports_per_day: int = 5
 
     # ── Embeddings ─────────────────────────────────────────────────────
-    embedding_dim: int = 512
+    # 384 = intfloat/multilingual-e5-small's output size. Changing this
+    # requires re-embedding every stored chunk and updating the pgvector
+    # column type in database/schema.sql + functions.sql to match.
+    embedding_dim: int = 384
 
     # ── Derived helpers ────────────────────────────────────────────────
     @property

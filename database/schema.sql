@@ -43,7 +43,7 @@ create table if not exists public.document_chunks (
     content       text not null,
     page_number   integer not null default 1,
     chunk_number  integer not null default 0,
-    embedding     vector(512),
+    embedding     vector(384), -- intfloat/multilingual-e5-small output size
     created_at    timestamptz not null default now()
 );
 

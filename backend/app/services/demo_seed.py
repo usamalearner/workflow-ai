@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app.services.documents import ParsedDocument, Page, chunk_document
-from app.services.embeddings import embed_texts
+from app.services.embeddings import embed_passages
 
 _TODAY = date.today()
 
@@ -194,7 +194,7 @@ def seed(repo, user_id: str) -> None:
             pages=[Page(page_number=i + 1, text=t) for i, t in enumerate(spec["pages"])]
         )
         chunks = chunk_document(parsed, document_id=doc["id"], user_id=user_id)
-        embeddings = embed_texts([c.content for c in chunks])
+        embeddings = embed_passages([c.content for c in chunks])
         repo.add_chunks(
             [
                 {

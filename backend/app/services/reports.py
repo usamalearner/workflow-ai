@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.services import llm
+from app.services import llm, rag
 
 REPORT_TITLES = {
     "executive_summary": "Executive Summary",
@@ -13,6 +13,20 @@ REPORT_TITLES = {
     "document_comparison": "Document Comparison",
 }
 
+# What each report type should pull out of a document via vector search,
+# instead of blindly sending its first N characters — so an insight buried
+# deep in a long document still has a shot at making the report.
+REPORT_FOCUS_QUERIES = {
+    "executive_summary": "overview outcomes achievements overall summary",
+    "technical_report": "technical specifications measurements methodology equipment faults",
+    "management_brief": "decisions priorities budget timeline resourcing",
+    "risk_assessment": "risk hazard safety issue critical failure likelihood impact",
+    "meeting_summary": "decisions made action items attendees agenda discussion points",
+    "document_comparison": "differences comparison discrepancy consistency",
+}
+_RETRIEVE_TOP_K = 12
+_MAX_CHARS_PER_DOC = 12000
+
 
 def build_report(
     repo,
@@ -22,6 +36,9 @@ def build_report(
     document_ids: list[str],
     title: str | None = None,
 ) -> dict:
+    focus_query = REPORT_FOCUS_QUERIES.get(
+        report_type, "key points issues and recommended actions"
+    )
     docs: list[dict] = []
     filenames: list[str] = []
     for doc_id in document_ids:
@@ -29,8 +46,23 @@ def build_report(
         if not doc:
             continue
         filenames.append(doc["original_filename"])
-        text = repo.document_text(user_id, doc_id)
-        docs.append({"filename": doc["original_filename"], "text": text})
+        passages = rag.retrieve(
+            repo,
+            user_id=user_id,
+            query=focus_query,
+            document_ids=[doc_id],
+            top_k=_RETRIEVE_TOP_K,
+        )
+        if passages:
+            text = "\n\n".join(
+                f"[Page {p['page_number']}] {p['snippet']}" for p in passages
+            )
+        else:
+            # Nothing scored above the relevance floor (e.g. a very short
+            # document) — fall back to the raw text rather than an empty
+            # section for that document.
+            text = repo.document_text(user_id, doc_id)
+        docs.append({"filename": doc["original_filename"], "text": text[:_MAX_CHARS_PER_DOC]})
 
     if not docs:
         raise ValueError("None of the selected documents were found in your workspace.")

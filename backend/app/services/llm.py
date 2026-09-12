@@ -116,18 +116,83 @@ def generate_answer(question: str, passages: list[dict]) -> tuple[str, bool]:
         return _demo_answer(question, passages), True
 
 
-def summarize_document(text: str, filename: str) -> dict[str, Any]:
+def _pack_pages(pages: list[dict], max_chars: int = 6000) -> list[str]:
+    """Group consecutive pages into batches capped at ~max_chars.
+
+    Backs the map step of map-reduce summarisation/extraction: a single LLM
+    call gets a bounded, page-labelled slice of the document instead of the
+    old approach of just truncating to the first N characters of the whole
+    file (which silently dropped anything past page ~4-6).
+    """
+    batches: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+    for page in pages:
+        piece = f"[Page {page.get('page_number', '?')}]\n{page['content']}"
+        if buf and buf_len + len(piece) > max_chars:
+            batches.append("\n\n".join(buf))
+            buf, buf_len = [], 0
+        buf.append(piece)
+        buf_len += len(piece)
+    if buf:
+        batches.append("\n\n".join(buf))
+    return batches
+
+
+def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map-reduce extraction re-scans overlapping/adjacent sections, so the
+    same action can surface more than once. Collapse near-duplicate titles
+    (bag-of-words overlap) rather than an exact-match check, since re-phrasing
+    across sections is common."""
+
+    def norm(title: str) -> set[str]:
+        return set(re.sub(r"[^a-z0-9 ]", " ", title.lower()).split())
+
+    kept: list[dict[str, Any]] = []
+    kept_norms: list[set[str]] = []
+    for a in actions:
+        words = norm(a.get("title", ""))
+        if words and any(
+            len(words & other) / max(len(words), len(other)) > 0.6
+            for other in kept_norms
+        ):
+            continue
+        kept.append(a)
+        kept_norms.append(words)
+    return kept
+
+
+def summarize_document(pages: list[dict], filename: str) -> dict[str, Any]:
+    """Map-reduce summary: each ~6k-char group of pages is summarised
+    independently (map), then those partial summaries are merged into one
+    final summary (reduce) — so a long document's later pages actually get
+    read instead of being cut off after the first ~16k characters."""
+    if not pages:
+        return {"summary": "", "key_points": []}
+    full_text = "\n\n".join(p["content"] for p in pages)
     if not settings.llm_configured:
-        return _demo_summary(text, filename)
+        return _demo_summary(full_text, filename)
+
     try:
+        partials = [_summarize_batch(b) for b in _pack_pages(pages)]
+        if len(partials) == 1:
+            return partials[0]
+        combined = "\n\n".join(
+            f"Section {i + 1}:\nSummary: {p['summary']}\n"
+            f"Key points: {'; '.join(p['key_points'])}"
+            for i, p in enumerate(partials)
+        )
         raw = _chat(
             [
                 {
                     "role": "system",
-                    "content": "Summarise the document. Return JSON: "
-                    '{"summary": str, "key_points": [str, ...]}. 5-7 key points.',
+                    "content": "These are summaries of consecutive sections of the "
+                    "same document. Merge them into one coherent overall summary. "
+                    'Return JSON {"summary": str, "key_points": [str, ...]} with '
+                    "5-8 key points covering the whole document, not just one "
+                    "section.",
                 },
-                {"role": "user", "content": text[:16000]},
+                {"role": "user", "content": combined[:16000]},
             ],
             json_mode=True,
         )
@@ -137,39 +202,77 @@ def summarize_document(text: str, filename: str) -> dict[str, Any]:
             "key_points": data.get("key_points", [])[:8],
         }
     except (LLMError, json.JSONDecodeError):
-        return _demo_summary(text, filename)
+        return _demo_summary(full_text, filename)
 
 
-def extract_actions(text: str, filename: str) -> list[dict[str, Any]]:
+def _summarize_batch(text: str) -> dict[str, Any]:
+    raw = _chat(
+        [
+            {
+                "role": "system",
+                "content": "Summarise this section of a larger document. Return "
+                'JSON: {"summary": str, "key_points": [str, ...]}. 3-5 key points.',
+            },
+            {"role": "user", "content": text},
+        ],
+        json_mode=True,
+    )
+    data = _loads(raw)
+    return {
+        "summary": data.get("summary", ""),
+        "key_points": data.get("key_points", [])[:8],
+    }
+
+
+def extract_actions(pages: list[dict], filename: str) -> list[dict[str, Any]]:
+    """Map-reduce extraction: every section is scanned independently (map) so
+    an action buried on page 9 isn't dropped just because the document is
+    longer than one LLM call's context budget, then results are merged and
+    deduplicated (reduce) since the same action often surfaces in more than
+    one section."""
+    if not pages:
+        return []
+    full_text = "\n\n".join(p["content"] for p in pages)
     if not settings.llm_configured:
-        return _demo_actions(text, filename)
+        return _demo_actions(full_text, filename)
+
     try:
-        raw = _chat(
-            [
-                {
-                    "role": "system",
-                    "content": "Extract concrete action items from the document. "
-                    'Return JSON {"actions": [{"title", "description", "owner", '
-                    '"deadline" (YYYY-MM-DD or null), "priority" '
-                    '(low|medium|high|critical)}]}. Only real, actionable items.',
-                },
-                {"role": "user", "content": text[:16000]},
-            ],
-            json_mode=True,
-        )
-        actions = _loads(raw).get("actions", [])
-        for a in actions:
-            a["source_filename"] = filename
-            a.setdefault("status", "pending")
-        return actions[:12]
+        all_actions: list[dict[str, Any]] = []
+        for batch in _pack_pages(pages):
+            all_actions.extend(_extract_actions_batch(batch, filename))
+        return _dedupe_actions(all_actions)[:20]
     except (LLMError, json.JSONDecodeError):
-        return _demo_actions(text, filename)
+        return _demo_actions(full_text, filename)
+
+
+def _extract_actions_batch(text: str, filename: str) -> list[dict[str, Any]]:
+    raw = _chat(
+        [
+            {
+                "role": "system",
+                "content": "Extract concrete action items from this section of a "
+                'larger document. Return JSON {"actions": [{"title", '
+                '"description", "owner", "deadline" (YYYY-MM-DD or null), '
+                '"priority" (low|medium|high|critical)}]}. Only real, actionable '
+                "items. Empty list if none in this section.",
+            },
+            {"role": "user", "content": text},
+        ],
+        json_mode=True,
+    )
+    actions = _loads(raw).get("actions", [])
+    for a in actions:
+        a["source_filename"] = filename
+        a.setdefault("status", "pending")
+    return actions
 
 
 def generate_report(report_type: str, docs: list[dict]) -> str:
     if not settings.llm_configured:
         return _demo_report(report_type, docs)
-    corpus = "\n\n".join(f"### {d['filename']}\n{d['text'][:6000]}" for d in docs)
+    # d["text"] is already the relevant slice (rag.retrieve output, curated by
+    # reports.build_report), not a naive truncation of the raw document.
+    corpus = "\n\n".join(f"### {d['filename']}\n{d['text']}" for d in docs)
     label = report_type.replace("_", " ").title()
     try:
         return _chat(

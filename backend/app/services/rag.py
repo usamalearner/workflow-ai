@@ -10,11 +10,16 @@ import logging
 
 from app.services import documents as docsvc
 from app.services import llm
-from app.services.embeddings import embed_text, embed_texts
+from app.services.embeddings import embed_passages, embed_query
 
 logger = logging.getLogger("workflow.rag")
 
-_MIN_SCORE = 0.03
+# E5 cosine scores sit in a much higher, narrower band than the old hashed
+# bag-of-words vectors did: a quick smoke test measured ~0.69 between a query
+# and a genuinely unrelated passage, and ~0.88 for a relevant one, both well
+# above the old 0.03 floor. This is a coarse starting point, not a calibrated
+# value — tune it against real queries over your own documents.
+_MIN_SCORE = 0.55
 
 
 def process_document(
@@ -32,7 +37,7 @@ def process_document(
         chunks = docsvc.chunk_document(
             parsed, document_id=document_id, user_id=user_id
         )
-        embeddings = embed_texts([c.content for c in chunks])
+        embeddings = embed_passages([c.content for c in chunks])
         repo.add_chunks(
             [
                 {
@@ -79,7 +84,7 @@ def retrieve(
     document_ids: list[str] | None = None,
     top_k: int = 6,
 ) -> list[dict]:
-    q_emb = embed_text(query)
+    q_emb = embed_query(query)
     rows = repo.search_chunks(user_id, q_emb, document_ids, top_k)
     passages: list[dict] = []
     for i, r in enumerate(rows, start=1):

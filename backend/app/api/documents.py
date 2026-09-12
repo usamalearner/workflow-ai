@@ -168,8 +168,8 @@ def summarize_document(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
     if doc["status"] != "ready":
         raise HTTPException(status.HTTP_409_CONFLICT, "Document is not ready yet.")
-    text = repo.document_text(user.id, document_id)
-    result = llm.summarize_document(text, doc["original_filename"])
+    pages = repo.document_pages(user.id, document_id)
+    result = llm.summarize_document(pages, doc["original_filename"])
     repo.record_event(user.id, "minutes_saved", 12)
     return SummaryOut(document_id=document_id, **result)
 
@@ -184,8 +184,8 @@ def extract_actions(
     if doc["status"] != "ready":
         raise HTTPException(status.HTTP_409_CONFLICT, "Document is not ready yet.")
 
-    text = repo.document_text(user.id, document_id)
-    raw = llm.extract_actions(text, doc["original_filename"])
+    pages = repo.document_pages(user.id, document_id)
+    raw = llm.extract_actions(pages, doc["original_filename"])
     by_priority: dict[str, int] = {"low": 0, "medium": 0, "high": 0, "critical": 0}
     for a in raw:
         by_priority[a.get("priority", "medium")] = (
